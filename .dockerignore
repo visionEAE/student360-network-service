@@ -1,0 +1,4 @@
+*
+!target/student360-network-service-*.jar
+target/*.original
+target/*-sources.jar
