@@ -1,0 +1,9 @@
+# Production deltas only. Callee for everyone, caller of core (directory enrichment).
+student360:
+  security:
+    service-token:
+      mode: google
+      secret: ""
+      expected-audience: ${SERVICE_AUDIENCE}
+      audience-map:
+        core-service: ${CORE_SERVICE_URL}
