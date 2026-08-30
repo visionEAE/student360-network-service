@@ -3,7 +3,9 @@ package co.edu.icesi.student360.network.infrastructure.config;
 import co.edu.icesi.student360.common.outbox.EventPublisher;
 import co.edu.icesi.student360.network.application.command.RemoveConnectionCommandHandler;
 import co.edu.icesi.student360.network.application.command.UpsertConnectionCommandHandler;
+import co.edu.icesi.student360.network.application.query.GetConnectionDetailQueryHandler;
 import co.edu.icesi.student360.network.application.query.GetSupportNetworkQueryHandler;
+import co.edu.icesi.student360.network.domain.port.DirectoryClient;
 import co.edu.icesi.student360.network.domain.port.SupportNetworkRepository;
 import java.time.Clock;
 import org.springframework.context.annotation.Bean;
@@ -32,5 +34,11 @@ public class NetworkConfiguration {
   public GetSupportNetworkQueryHandler getSupportNetworkQueryHandler(
       SupportNetworkRepository repository) {
     return new GetSupportNetworkQueryHandler(repository);
+  }
+
+  @Bean
+  public GetConnectionDetailQueryHandler getConnectionDetailQueryHandler(
+      SupportNetworkRepository repository, DirectoryClient directory) {
+    return new GetConnectionDetailQueryHandler(repository, directory);
   }
 }
