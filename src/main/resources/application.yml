@@ -26,6 +26,9 @@ management:
 
 student360:
   service-name: network-service     # also the audience every inbound service token must carry
+  clients:
+    core-service:
+      url: ${CORE_SERVICE_URL:http://localhost:8082}
   security:
     service-token:
       secret: ${SERVICE_TOKEN_SECRET}

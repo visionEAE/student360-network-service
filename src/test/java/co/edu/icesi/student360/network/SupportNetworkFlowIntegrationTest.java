@@ -11,10 +11,13 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import co.edu.icesi.student360.common.identity.IdentityHeaders;
 import co.edu.icesi.student360.common.logging.Correlation;
 import co.edu.icesi.student360.common.security.ServiceTokenProvider;
+import co.edu.icesi.student360.network.domain.model.DirectoryProfile;
+import co.edu.icesi.student360.network.domain.port.DirectoryClient;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -25,6 +28,7 @@ import org.springframework.boot.testcontainers.service.connection.ServiceConnect
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.testcontainers.containers.Neo4jContainer;
@@ -64,6 +68,12 @@ class SupportNetworkFlowIntegrationTest {
   @Autowired private ServiceTokenProvider tokens;
   @Autowired private ObjectMapper json;
   @Autowired private org.springframework.data.neo4j.core.Neo4jClient neo4jClient;
+
+  /**
+   * core-service is not running in this test; mocking the port keeps both the enriched and the
+   * degraded path deterministic rather than depending on a real call failing in a particular way.
+   */
+  @MockitoBean private DirectoryClient directoryClient;
 
   @BeforeEach
   void cleanAuditTrailAndGraph() {
@@ -329,6 +339,204 @@ class SupportNetworkFlowIntegrationTest {
                 .header(IdentityHeaders.EXTERNAL_REFERENCE, "S-1003"))
         .andExpect(status().isUnauthorized());
     assertThat(jdbc.queryForList("SELECT * FROM audit.audit_record")).isEmpty();
+  }
+
+  @Test
+  void shouldOpenAPersonalConnectionWithTheContactDetailsTheStudentTypedIn() throws Exception {
+    String created =
+        mockMvc
+            .perform(
+                as(
+                        MARIA,
+                        "STUDENT",
+                        "S-1003",
+                        post("/api/network/students/S-1003/connections"),
+                        "detail-create")
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .content(
+                        """
+                        {"person":{"kind":"FAMILY","displayName":"Marta Rojas (madre)",
+                                   "email":"marta.rojas@example.com","phone":"+57 300 111 2233",
+                                   "summary":"Mi mamá, vive en Cali"},
+                         "relationshipLabel":"FAMILY","weight":9}"""))
+            .andExpect(status().isCreated())
+            .andReturn()
+            .getResponse()
+            .getContentAsString();
+    String motherReference = json.readTree(created).path("personReference").asText();
+
+    mockMvc
+        .perform(
+            as(
+                MARIA,
+                "STUDENT",
+                "S-1003",
+                get("/api/network/students/S-1003/connections/" + motherReference),
+                "detail-read"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.person.displayName").value("Marta Rojas (madre)"))
+        .andExpect(jsonPath("$.contact.email").value("marta.rojas@example.com"))
+        .andExpect(jsonPath("$.contact.phone").value("+57 300 111 2233"))
+        .andExpect(jsonPath("$.contact.summary").value("Mi mamá, vive en Cali"))
+        .andExpect(jsonPath("$.contact.source").value("SELF_REPORTED"))
+        .andExpect(jsonPath("$.edges.length()").value(1))
+        .andExpect(jsonPath("$.edges[0].weight").value(9));
+
+    assertThat(auditActions()).contains("READ_SUPPORT_CONNECTION_DETAIL");
+  }
+
+  @Test
+  void shouldEnrichAProfessorFromTheDirectoryInsteadOfTheStoredName() throws Exception {
+    org.mockito.Mockito.when(directoryClient.lookup("PROF-4"))
+        .thenReturn(
+            Optional.of(
+                new DirectoryProfile(
+                    "PROF-4",
+                    "Dra. Lucía Fernández",
+                    "lucia.fernandez@icesi.edu.co",
+                    "Psychology",
+                    "Psicopatología")));
+
+    mockMvc
+        .perform(
+            as(
+                    MARIA,
+                    "STUDENT",
+                    "S-1003",
+                    post("/api/network/students/S-1003/connections"),
+                    "detail-prof-create")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(
+                    """
+                    {"person":{"reference":"PROF-4","kind":"PROFESSOR","displayName":"Lucia F."},
+                     "relationshipLabel":"PROFESSOR","weight":6}"""))
+        .andExpect(status().isCreated());
+
+    mockMvc
+        .perform(
+            as(
+                MARIA,
+                "STUDENT",
+                "S-1003",
+                get("/api/network/students/S-1003/connections/PROF-4"),
+                "detail-prof-read"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.person.displayName").value("Dra. Lucía Fernández"))
+        .andExpect(jsonPath("$.contact.email").value("lucia.fernandez@icesi.edu.co"))
+        .andExpect(jsonPath("$.contact.headline").value("Psychology"))
+        .andExpect(jsonPath("$.contact.summary").value("Psicopatología"))
+        .andExpect(jsonPath("$.contact.source").value("DIRECTORY"));
+  }
+
+  @Test
+  void shouldStillRenderTheCardWhenTheDirectoryIsUnavailable() throws Exception {
+    // The port degrades to empty when core-service cannot be reached; the card must survive it.
+    org.mockito.Mockito.when(directoryClient.lookup("PROF-4")).thenReturn(Optional.empty());
+
+    mockMvc
+        .perform(
+            as(
+                    MARIA,
+                    "STUDENT",
+                    "S-1003",
+                    post("/api/network/students/S-1003/connections"),
+                    "detail-degraded-create")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(
+                    """
+                    {"person":{"reference":"PROF-4","kind":"PROFESSOR",
+                               "displayName":"Dra. Lucía Fernández"},
+                     "relationshipLabel":"PROFESSOR","weight":6}"""))
+        .andExpect(status().isCreated());
+
+    mockMvc
+        .perform(
+            as(
+                MARIA,
+                "STUDENT",
+                "S-1003",
+                get("/api/network/students/S-1003/connections/PROF-4"),
+                "detail-degraded-read"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.person.displayName").value("Dra. Lucía Fernández"))
+        .andExpect(jsonPath("$.contact.source").value("NONE"));
+  }
+
+  @Test
+  void shouldNotRevealAPersonWhoDoesNotSupportThisStudent() throws Exception {
+    // The person exists in the graph, but only as Ana's connection — not María's.
+    String created =
+        mockMvc
+            .perform(
+                as(
+                        ANA,
+                        "STUDENT",
+                        "S-1001",
+                        post("/api/network/students/S-1001/connections"),
+                        "detail-foreign-create")
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .content(
+                        """
+                        {"person":{"kind":"FAMILY","displayName":"Alguien de Ana",
+                                   "phone":"+57 300 999 8877"},
+                         "relationshipLabel":"FAMILY","weight":8}"""))
+            .andExpect(status().isCreated())
+            .andReturn()
+            .getResponse()
+            .getContentAsString();
+    String anasPerson = json.readTree(created).path("personReference").asText();
+
+    mockMvc
+        .perform(
+            as(
+                MARIA,
+                "STUDENT",
+                "S-1003",
+                get("/api/network/students/S-1003/connections/" + anasPerson),
+                "detail-foreign-read"))
+        .andExpect(status().isNotFound());
+  }
+
+  @Test
+  void shouldLetAnAdvisorOpenTheSameCard() throws Exception {
+    String created =
+        mockMvc
+            .perform(
+                as(
+                        MARIA,
+                        "STUDENT",
+                        "S-1003",
+                        post("/api/network/students/S-1003/connections"),
+                        "detail-advisor-create")
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .content(
+                        """
+                        {"person":{"kind":"FAMILY","displayName":"Marta Rojas (madre)",
+                                   "phone":"+57 300 111 2233"},
+                         "relationshipLabel":"FAMILY","weight":9}"""))
+            .andExpect(status().isCreated())
+            .andReturn()
+            .getResponse()
+            .getContentAsString();
+    String motherReference = json.readTree(created).path("personReference").asText();
+
+    mockMvc
+        .perform(
+            as(
+                CARLOS,
+                "ADVISOR",
+                "A-2001",
+                get("/api/network/advisors/me/students/S-1003/connections/" + motherReference),
+                "detail-advisor-read"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.contact.phone").value("+57 300 111 2233"))
+        .andExpect(jsonPath("$.person.displayName").value("Marta Rojas (madre)"));
+  }
+
+  private List<String> auditActions() {
+    return jdbc.queryForList("SELECT action FROM audit.audit_record").stream()
+        .map(row -> (String) row.get("action"))
+        .toList();
   }
 
   private MockHttpServletRequestBuilder as(
